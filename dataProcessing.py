@@ -3,20 +3,20 @@ import matplotlib.pyplot as plt
 from prophet import Prophet
 import logging
 import numpy as np
-logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
 from scipy.signal import savgol_filter
 
+logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+
+# Load dataset
 data = pd.read_csv('system_usage.csv')
 frame = pd.DataFrame(data)
 
-frame['Memory'] = frame['Memory'].str.replace(' kB', '', regex=False)
-frame['Memory'] = pd.to_numeric(frame['Memory'])
+
+frame['Memory'] = frame['Memory'].str.replace(' kB', '', regex=False).astype(int)
+frame['CPU'] = frame['CPU'].astype(float)
 frame['Date'] = pd.to_datetime(frame['Date'])
-pd.set_option('display.max_rows', None)
-pd.set_option('display.max_colwidth', None)
 groupDataFrame = frame.sort_values(["ProcessName", "Date"])
 
-print(groupDataFrame)
 
 fig, ax1 = plt.subplots()
 
@@ -31,6 +31,7 @@ ax1.set_title("CPU Usage Over Time by Process")
 ax1.grid(axis="y", linestyle="--", alpha=0.7)
 ax1.legend(loc="upper left")
 
+
 fig2, ax2 = plt.subplots()
 
 for process in groupDataFrame['ProcessName'].unique():
@@ -44,32 +45,72 @@ ax2.set_title("Memory Usage Over Time by Process")
 ax2.grid(axis="y", linestyle="--", alpha=0.7)
 ax2.legend(loc="upper left")
 
-data_to = {}
-for process in groupDataFrame['ProcessName'].unique():
-    subsets = groupDataFrame[groupDataFrame["ProcessName"] == process]
-    subsets.loc[:, 'Memory'] = savgol_filter(subsets['Memory'], 11, 3).round().astype('int64')
-    subsets = subsets.rename(columns={'Date': 'ds', 'Memory': 'y'})
-    data_to[process] = subsets
 
-plt.figure(figsize=(10,6))
+totalCPU = groupDataFrame.groupby("Date")["CPU"].sum().reset_index()
 
+
+with open('/proc/stat', 'r') as f:
+    first_line = f.readline()
+cpu_times = list(map(int, first_line.split()[1:])) 
+total_cpu_time = sum(cpu_times) 
+
+# Normalize CPU usage
+totalCPU["CPU"] = (totalCPU["CPU"] / total_cpu_time) * 100  # Scale CPU usage
+
+# Ensure values stay within 0-100%
+totalCPU["CPU"] = totalCPU["CPU"].clip(0, 100)
+
+# **🔹 Plot Overall CPU Usage**
+fig3, ax3 = plt.subplots()
+ax3.plot(totalCPU["Date"], totalCPU["CPU"], marker="*", linestyle="--", color="green", label="Total CPU Usage")
+
+ax3.set_xlabel("Date")
+ax3.set_ylabel("Total CPU Usage (%)")
+ax3.set_title("Total CPU Usage Over Time")
+ax3.grid(axis="y", linestyle="--", alpha=0.7)
+ax3.legend()
+
+
+forecast_data = totalCPU.rename(columns={"Date": "ds", "CPU": "y"})
+
+model = Prophet()
+model.fit(forecast_data)
+
+future = model.make_future_dataframe(periods=30)
+forecast = model.predict(future)
+
+plt.figure(figsize=(10, 6))
+plt.plot(forecast["ds"], forecast["yhat"], label="Predicted CPU Usage", color="blue")
+plt.xlabel("Date")
+plt.ylabel("CPU Usage (%)")
+plt.title("CPU Usage Forecast")
+plt.legend()
+
+
+plt.figure(figsize=(10, 6))
 colors = [
     'blue', 'green', 'red', 'purple', 'orange',
-    'cyan', 'magenta', 'yellow', 'brown', 'pink',
-    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
+    'cyan', 'magenta', 'yellow', 'brown', 'pink'
 ]
 
-for i, (process, subset) in enumerate(data_to.items()):
+for i, process in enumerate(groupDataFrame['ProcessName'].unique()):
+    subset = groupDataFrame[groupDataFrame["ProcessName"] == process].copy()
+    
+    # Apply smoothing
+    subset.loc[:, 'CPU'] = savgol_filter(subset['CPU'], 5, 2).round(2)
+    
+    subset = subset.rename(columns={'Date': 'ds', 'CPU': 'y'})
+    
     model = Prophet()
     model.fit(subset)
+    
     future = model.make_future_dataframe(periods=30)
     forecast = model.predict(future)
-    forecast['yhat'] = np.maximum(forecast['yhat'], 0)  # Ensure values do not go below zero
-    plt.plot(forecast['ds'], forecast['yhat'], color=colors[i % len(colors)], label=process)
+    
+    plt.plot(forecast['ds'], forecast['yhat'], color=colors[i % len(colors)], label=f"{process} Prediction")
 
-plt.xlabel('Date')
-plt.ylabel('Forecast Value')
-plt.title('Forecast Lines for Multiple Processes')
+plt.xlabel("Date")
+plt.ylabel("Predicted CPU Usage (%)")
+plt.title("Per-Process CPU Usage Forecast")
 plt.legend()
 plt.show()

@@ -8,6 +8,9 @@
 #include <chrono>
 #include <thread>
 #include <future>   
+#include <termios.h>
+#include <unistd.h>
+#include <sys/select.h>  
 #include "ProcessInfo.h"
 using namespace std;
 
@@ -87,29 +90,45 @@ void killProcessByName(const string& processName) {
 }
 
 // Function to ask user if they want to kill a process (with a timeout)
+
+
+
 void askToKillProcess() {
     cout << "Do you want to kill a process? (yes/no): ";
-
-    // Run input operation asynchronously with a timeout
-    future<string> userInput = async(launch::async, [] {
+    
+    fd_set set;
+    struct timeval timeout;
+    FD_ZERO(&set);
+    FD_SET(STDIN_FILENO, &set);
+    
+    timeout.tv_sec = 10;  // 10 seconds timeout
+    timeout.tv_usec = 0;
+    
+    int ret = select(STDIN_FILENO + 1, &set, NULL, NULL, &timeout);
+    
+    if (ret > 0) {  
         string response;
         cin >> response;
-        return response;
-    });
-
-    // Wait for input with a timeout of 10 seconds
-    if (userInput.wait_for(chrono::seconds(10)) == future_status::ready) {
-        string response = userInput.get();
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');  // Clear any leftover input
         if (response == "yes") {
             cout << "Enter the process name to kill: ";
             string processName;
             cin >> processName;
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');  // Clear input buffer again
             killProcessByName(processName);
         }
     } else {
         cout << "No response in 10 seconds. Moving forward...\n";
     }
+
+    // **Ensure standard input is reset**
+    tcflush(STDIN_FILENO, TCIFLUSH);  
+
+    cout << "askToKillProcess() returned, continuing...\n";
 }
+
+
+
 
 int main() {
     while (true) {
@@ -133,7 +152,7 @@ int main() {
         askToKillProcess();  // Ask user if they want to kill a process (with timeout)
 
         cout << "Sleeping for 2 minutes before next update...\n" << endl;
-        this_thread::sleep_for(chrono::minutes(2)); // Wait 2 minutes
+        this_thread::sleep_for(chrono::minutes(2)); // Wait 2 minutes 
     }
 
     return 0;
