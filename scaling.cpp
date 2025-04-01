@@ -4,17 +4,17 @@
 #include <sstream>
 #include <unistd.h>
 #include <vector>
-#include <cstdlib>  
+#include <cstdlib>
 #include <chrono>
 #include <thread>
-#include <future>   
+#include <future>
 #include <termios.h>
-#include <unistd.h>
-#include <sys/select.h>  
+#include <sys/select.h>
 #include "ProcessInfo.h"
+
 using namespace std;
 
-
+string priorityProcess = "";
 
 // Function to get and print process details from processes.csv
 vector<ProcessInfo> getProcessDetails() {
@@ -43,7 +43,6 @@ vector<ProcessInfo> getProcessDetails() {
         getline(ss, process.memUsage, ',');
         ss >> process.cpuUsage;
 
-        // Print process details
         cout << process.date << "\t" << process.pid << "\t" << process.name << "\t" 
              << process.memUsage << "\t" << process.cpuUsage << "%" << endl;
 
@@ -57,9 +56,20 @@ vector<ProcessInfo> getProcessDetails() {
 }
 
 // Function to set power profile
-void adjustPowerProfile(double totalCPUUsage) {
+void adjustPowerProfile(double totalCPUUsage, const vector<ProcessInfo>& processes) {
     string profile;
-    if (totalCPUUsage < 20.0) {
+    
+    bool priorityRunning = false;
+    for (const auto& process : processes) {
+        if (process.name == priorityProcess) {
+            priorityRunning = true;
+            break;
+        }
+    }
+    
+    if (priorityRunning) {
+        profile = "latency-performance";
+    } else if (totalCPUUsage < 20.0) {
         profile = "powersave";
     } else if (totalCPUUsage < 50.0) {
         profile = "balanced";
@@ -90,9 +100,6 @@ void killProcessByName(const string& processName) {
 }
 
 // Function to ask user if they want to kill a process (with a timeout)
-
-
-
 void askToKillProcess() {
     cout << "Do you want to kill a process? (yes/no): ";
     
@@ -121,16 +128,27 @@ void askToKillProcess() {
         cout << "No response in 10 seconds. Moving forward...\n";
     }
 
-    // **Ensure standard input is reset**
-    tcflush(STDIN_FILENO, TCIFLUSH);  
-
+    tcflush(STDIN_FILENO, TCIFLUSH);  // Ensure standard input is reset
     cout << "askToKillProcess() returned, continuing...\n";
 }
 
-
-
+void askForPriorityProcess() {
+    cout << "Would you like to set a priority process? (yes/no): ";
+    string response;
+    cin >> response;
+    cin.ignore(numeric_limits<streamsize>::max(), '\n');
+    
+    if (response == "yes") {
+        cout << "Enter the process name to prioritize: ";
+        cin >> priorityProcess;
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
+        cout << "Priority process set to: " << priorityProcess << endl;
+    }
+}
 
 int main() {
+    askForPriorityProcess();
+    
     while (true) {
         cout << "Running csvExport to collect process data..." << endl;
         system("./csvExport");  
@@ -140,15 +158,25 @@ int main() {
         cout << "Reading processes.csv to determine CPU usage..." << endl;
         vector<ProcessInfo> processes = getProcessDetails();
 
+        // Detect number of CPU cores dynamically
+        int numCores = sysconf(_SC_NPROCESSORS_ONLN);
+        if (numCores <= 0) {
+            cerr << "Error retrieving CPU core count. Defaulting to 1 core." << endl;
+            numCores = 1;
+        }
+
         // Calculate total CPU usage
         double totalCPUUsage = 0.0;
         for (const auto& process : processes) {
             totalCPUUsage += process.cpuUsage;
         }
-        cout << "Total CPU Usage: " << totalCPUUsage << "%" << endl;
 
-        adjustPowerProfile(totalCPUUsage);
+        // Normalize by core count
+        totalCPUUsage /= numCores;
 
+        cout << "Total CPU Usage (normalized): " << totalCPUUsage << "%" << endl;
+
+        adjustPowerProfile(totalCPUUsage, processes);
         askToKillProcess();  // Ask user if they want to kill a process (with timeout)
 
         cout << "Sleeping for 2 minutes before next update...\n" << endl;
