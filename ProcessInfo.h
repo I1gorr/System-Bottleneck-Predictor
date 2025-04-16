@@ -9,12 +9,11 @@
 using namespace std;
 
 struct ProcessInfo {
-    string pid;         
-    string name;        
-    string memUsage;    
-    string date;
-    double cpuUsage; 
-
+    string time;        // Time of recording (HH:MM:SS)
+    string name;        // Process name
+    string memUsage;    // Memory usage
+    string date;        // Date of recording (YYYY-MM-DD)
+    double cpuUsage;    // CPU usage in percent
 
     // Operator overload to allow sorting by CPU usage (highest first)
     bool operator<(const ProcessInfo &other) const {
@@ -33,5 +32,7 @@ long getProcessCPUTime(const string &pid);
 double getCPUUsage(const string &pid);
 void scanProcesses(const vector<string> &pids);
 void listHighCPUProcesses();
+void exportHighCPUProcesses(const string &filename);
 
 #endif  
+    

@@ -16,11 +16,11 @@ using namespace std;
 
 string priorityProcess = "";
 
-// Function to get and print process details from processes.csv
+// Read from high_cpu_processes.csv (not processes.csv anymore)
 vector<ProcessInfo> getProcessDetails() {
-    ifstream file("processes.csv");
+    ifstream file("high_cpu_processes.csv");
     if (!file.is_open()) {
-        cerr << "Error: Unable to open processes.csv" << endl;
+        cerr << "Error: Unable to open high_cpu_processes.csv" << endl;
         return {};
     }
 
@@ -30,20 +30,22 @@ vector<ProcessInfo> getProcessDetails() {
     vector<ProcessInfo> processes;
     double totalCPUUsage = 0.0;
 
-    cout << "\n----- Process Details from processes.csv -----\n";
-    cout << "Date\t\tPID\tProcess Name\tMemory Usage\tCPU Usage\n";
+    cout << "\n----- Process Details from high_cpu_processes.csv -----\n";
+    cout << "Date\t\tTime\tProcess Name\tMemory Usage\tCPU Usage\n";
 
     while (getline(file, line)) {
         stringstream ss(line);
         ProcessInfo process;
+        string cpuStr;
 
         getline(ss, process.date, ',');
-        getline(ss, process.pid, ',');
+        getline(ss, process.time, ',');
         getline(ss, process.name, ',');
         getline(ss, process.memUsage, ',');
-        ss >> process.cpuUsage;
+        getline(ss, cpuStr, '%');
 
-        cout << process.date << "\t" << process.pid << "\t" << process.name << "\t" 
+        process.cpuUsage = stod(cpuStr);
+        cout << process.date << "\t" << process.time << "\t" << process.name << "\t"
              << process.memUsage << "\t" << process.cpuUsage << "%" << endl;
 
         totalCPUUsage += process.cpuUsage;
@@ -55,18 +57,17 @@ vector<ProcessInfo> getProcessDetails() {
     return processes;
 }
 
-// Function to set power profile
 void adjustPowerProfile(double totalCPUUsage, const vector<ProcessInfo>& processes) {
     string profile;
-    
     bool priorityRunning = false;
+
     for (const auto& process : processes) {
         if (process.name == priorityProcess) {
             priorityRunning = true;
             break;
         }
     }
-    
+
     if (priorityRunning) {
         profile = "latency-performance";
     } else if (totalCPUUsage < 20.0) {
@@ -86,7 +87,6 @@ void adjustPowerProfile(double totalCPUUsage, const vector<ProcessInfo>& process
     }
 }
 
-// Function to kill a process by name
 void killProcessByName(const string& processName) {
     string command = "pkill -f " + processName;
     cout << "Attempting to kill process: " << processName << endl;
@@ -99,36 +99,35 @@ void killProcessByName(const string& processName) {
     }
 }
 
-// Function to ask user if they want to kill a process (with a timeout)
 void askToKillProcess() {
     cout << "Do you want to kill a process? (yes/no): ";
-    
+
     fd_set set;
     struct timeval timeout;
     FD_ZERO(&set);
     FD_SET(STDIN_FILENO, &set);
-    
-    timeout.tv_sec = 10;  // 10 seconds timeout
+
+    timeout.tv_sec = 10;
     timeout.tv_usec = 0;
-    
+
     int ret = select(STDIN_FILENO + 1, &set, NULL, NULL, &timeout);
-    
-    if (ret > 0) {  
+
+    if (ret > 0) {
         string response;
         cin >> response;
-        cin.ignore(numeric_limits<streamsize>::max(), '\n');  // Clear any leftover input
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
         if (response == "yes") {
             cout << "Enter the process name to kill: ";
             string processName;
             cin >> processName;
-            cin.ignore(numeric_limits<streamsize>::max(), '\n');  // Clear input buffer again
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
             killProcessByName(processName);
         }
     } else {
         cout << "No response in 10 seconds. Moving forward...\n";
     }
 
-    tcflush(STDIN_FILENO, TCIFLUSH);  // Ensure standard input is reset
+    tcflush(STDIN_FILENO, TCIFLUSH);
     cout << "askToKillProcess() returned, continuing...\n";
 }
 
@@ -137,7 +136,7 @@ void askForPriorityProcess() {
     string response;
     cin >> response;
     cin.ignore(numeric_limits<streamsize>::max(), '\n');
-    
+
     if (response == "yes") {
         cout << "Enter the process name to prioritize: ";
         cin >> priorityProcess;
@@ -148,39 +147,41 @@ void askForPriorityProcess() {
 
 int main() {
     askForPriorityProcess();
-    
+
     while (true) {
-        cout << "Running csvExport to collect process data..." << endl;
-        system("./csvExport");  
+        cout << "Running ./findprocess to collect process data..." << endl;
+        int status = system("./findprocess");
+        if (status != 0) {
+            cerr << "Error running ./findprocess. Please check if the tool is available and executable." << endl;
+            cerr << "findprocess failed. Exiting..." << endl;
+            break;
+        }
 
-        this_thread::sleep_for(chrono::seconds(10));  // Wait for csvExport to complete
+        this_thread::sleep_for(chrono::seconds(5));
 
-        cout << "Reading processes.csv to determine CPU usage..." << endl;
+        cout << "Reading high_cpu_processes.csv to determine CPU usage..." << endl;
         vector<ProcessInfo> processes = getProcessDetails();
 
-        // Detect number of CPU cores dynamically
         int numCores = sysconf(_SC_NPROCESSORS_ONLN);
         if (numCores <= 0) {
             cerr << "Error retrieving CPU core count. Defaulting to 1 core." << endl;
             numCores = 1;
         }
 
-        // Calculate total CPU usage
         double totalCPUUsage = 0.0;
         for (const auto& process : processes) {
             totalCPUUsage += process.cpuUsage;
         }
 
-        // Normalize by core count
         totalCPUUsage /= numCores;
 
         cout << "Total CPU Usage (normalized): " << totalCPUUsage << "%" << endl;
 
         adjustPowerProfile(totalCPUUsage, processes);
-        askToKillProcess();  // Ask user if they want to kill a process (with timeout)
+        askToKillProcess();
 
         cout << "Sleeping for 2 minutes before next update...\n" << endl;
-        this_thread::sleep_for(chrono::minutes(2)); // Wait 2 minutes 
+        this_thread::sleep_for(chrono::minutes(2));
     }
 
     return 0;

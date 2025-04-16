@@ -1,5 +1,3 @@
-#include "ProcessInfo.h"
-#include "HighCPUProcesses.h"  
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -8,14 +6,28 @@
 #include <iomanip>
 #include <algorithm>
 #include <thread>
+#include <mutex>
+#include <vector>
 
 using namespace std;
 namespace fs = filesystem;
 
+// Struct to store process info
+struct ProcessInfo {
+    string time;
+    string name;
+    string memUsage;
+    string date;
+    double cpuUsage;
+
+    // Sort by CPU usage descending
+    bool operator<(const ProcessInfo &other) const {
+        return cpuUsage > other.cpuUsage;
+    }
+};
 
 mutex dataMutex;
 vector<ProcessInfo> highCPUProcesses;
-
 
 string getProcessName(const string &pid) {
     ifstream cmdFile("/proc/" + pid + "/comm");
@@ -26,20 +38,18 @@ string getProcessName(const string &pid) {
     return "Unknown";
 }
 
-// Function to get memory usage (RAM) from /proc/<PID>/status
 string getProcessMemoryUsage(const string &pid) {
     ifstream statusFile("/proc/" + pid + "/status");
     string line;
     if (!statusFile.is_open()) return "N/A";
 
     while (getline(statusFile, line)) {
-        if (line.find("VmRSS:") == 0) {  
+        if (line.find("VmRSS:") == 0) {
             return line.substr(8);
         }
     }
     return "N/A";
 }
-
 
 long getProcessCPUTime(const string &pid) {
     ifstream statFile("/proc/" + pid + "/stat");
@@ -57,35 +67,38 @@ long getProcessCPUTime(const string &pid) {
 
     if (tokens.size() < 17) return -1;
 
-    return stol(tokens[13]) + stol(tokens[14]);  // User + Kernel CPU time
+    return stol(tokens[13]) + stol(tokens[14]);  // utime + stime
 }
 
-
 double getCPUUsage(const string &pid) {
-    long cpuTime1 = getProcessCPUTime(pid);  
-    usleep(100000);  
-    long cpuTime2 = getProcessCPUTime(pid);  
+    long cpuTime1 = getProcessCPUTime(pid);
+    usleep(100000);  // sleep for 100 ms
+    long cpuTime2 = getProcessCPUTime(pid);
 
     if (cpuTime1 == -1 || cpuTime2 == -1 || cpuTime1 == cpuTime2) return 0.0;
 
     return ((cpuTime2 - cpuTime1) / (double) sysconf(_SC_CLK_TCK)) * 100;
 }
 
-
 void scanProcesses(const vector<string> &pids) {
     vector<ProcessInfo> localResults;
-    
+
     time_t now = time(nullptr);
     tm* localTime = localtime(&now);
+
     ostringstream dateStream;
     dateStream << put_time(localTime, "%Y-%m-%d");
     string formattedDate = dateStream.str();
 
+    ostringstream timeStream;
+    timeStream << put_time(localTime, "%H:%M:%S");
+    string formattedTime = timeStream.str();
+
     for (const string &pid : pids) {
         double cpuUsage = getCPUUsage(pid);
-        if (cpuUsage > 1.0) {  
+        if (cpuUsage > 1.0) {
             localResults.push_back({
-                pid,
+                formattedTime,
                 getProcessName(pid),
                 getProcessMemoryUsage(pid),
                 formattedDate,
@@ -98,14 +111,13 @@ void scanProcesses(const vector<string> &pids) {
     highCPUProcesses.insert(highCPUProcesses.end(), localResults.begin(), localResults.end());
 }
 
-
 void listHighCPUProcesses() {
     vector<string> allPids;
 
     for (const auto &entry : fs::directory_iterator("/proc")) {
         if (entry.is_directory()) {
             string pid = entry.path().filename();
-            if (all_of(pid.begin(), pid.end(), ::isdigit)) {  
+            if (all_of(pid.begin(), pid.end(), ::isdigit)) {
                 allPids.push_back(pid);
             }
         }
@@ -130,42 +142,46 @@ void listHighCPUProcesses() {
     sort(highCPUProcesses.begin(), highCPUProcesses.end());
 
     cout << left << setw(20) << "Date"
-         << setw(10) << "PID"
+         << setw(10) << "Time"
          << setw(25) << "Process Name"
          << setw(15) << "Memory Usage"
          << setw(10) << "CPU (%)" << endl;
-    cout << "---------------------------------------------------------------------------\n";
+    cout << "-------------------------------------------------------------------------------\n";
 
     for (size_t i = 0; i < min(highCPUProcesses.size(), size_t(10)); i++) {
         const auto &p = highCPUProcesses[i];
-        cout << left << setw(20)<< p.date
-             << setw(10) << p.pid
+        cout << left << setw(20) << p.date
+             << setw(10) << p.time
              << setw(25) << p.name
              << setw(15) << p.memUsage
              << setw(10) << fixed << setprecision(2) << p.cpuUsage << "%" << endl;
     }
 }
 
-
 void exportHighCPUProcesses(const string &filename) {
     ofstream outFile(filename);
-    
+
     if (!outFile.is_open()) {
         cerr << "Error: Unable to open file " << filename << " for writing!" << endl;
         return;
     }
 
-    outFile << "Date,PID,Process Name,Memory Usage,CPU (%)\n";
-
+    outFile << "Date,Time,Process Name,Memory Usage,CPU (%)\n";
 
     for (const auto &p : highCPUProcesses) {
-        outFile <<p.date<<","
-                << p.pid << ","
+        outFile << p.date << ","
+                << p.time << ","
                 << p.name << ","
                 << p.memUsage << ","
                 << fixed << setprecision(2) << p.cpuUsage << "%\n";
     }
 
     outFile.close();
-    cout << "High CPU processes exported to " << filename << endl;
+    cout << "✅ High CPU processes exported to " << filename << endl;
+}
+
+int main() {
+    listHighCPUProcesses();
+    exportHighCPUProcesses("high_cpu_processes.csv");
+    return 0;
 }
