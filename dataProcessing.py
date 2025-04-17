@@ -1,151 +1,159 @@
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
-import matplotlib.pyplot as plt
+from lightgbm import early_stopping, log_evaluation
 
-# Load and preprocess data
-data = pd.read_csv('system_usage_30days.csv')
+# Load data
+data = pd.read_csv('system_usage_1year.csv')
 data['DateTime'] = pd.to_datetime(data['Date'] + ' ' + data['Time'])
-data['MemoryUsage'] = data['MemoryUsage'].str.replace(' kB', '', regex=False).astype(int)
 data['CPU'] = data['CPU'].astype(float)
+data['MemoryUsage'] = data['MemoryUsage'].str.replace(' kB', '', regex=False).astype(int)
+data['Date'] = pd.to_datetime(data['Date'])
 
-# Aggregate per timestamp
-agg_data = data.groupby('DateTime').agg({
-    'CPU': 'sum',               # Total CPU usage
-    'MemoryUsage': 'sum'        # Total memory usage
+# Compute 75th percentile of CPU usage per day (over all timestamps that day)
+daily_agg = data.groupby('Date').agg({
+    'CPU': lambda x: np.percentile(x, 75),
+    'MemoryUsage': 'sum'
 }).reset_index()
 
-# Add trend-based features
-agg_data['CPU_rolling_mean_3'] = agg_data['CPU'].rolling(window=3).mean()
-agg_data['CPU_rolling_std_3'] = agg_data['CPU'].rolling(window=3).std()
-agg_data['CPU_diff'] = agg_data['CPU'].diff()
-agg_data['CPU_pct_change'] = agg_data['CPU'].pct_change()
-agg_data['Memory_diff'] = agg_data['MemoryUsage'].diff()
+daily_agg.rename(columns={'CPU': 'CPU_75th'}, inplace=True)
 
-# Drop rows with NaNs (due to rolling and diff)
-agg_data.dropna(inplace=True)
+# Feature engineering
+daily_agg['CPU_diff'] = daily_agg['CPU_75th'].diff()
+daily_agg['CPU_pct_change'] = daily_agg['CPU_75th'].pct_change()
+daily_agg['Memory_diff'] = daily_agg['MemoryUsage'].diff()
+daily_agg['CPU_rolling_mean_3'] = daily_agg['CPU_75th'].rolling(window=3).mean()
+daily_agg['CPU_rolling_std_3'] = daily_agg['CPU_75th'].rolling(window=3).std()
+daily_agg.dropna(inplace=True)
 
-# Prepare features and target
-X = agg_data[['CPU_rolling_mean_3', 'CPU_rolling_std_3', 'CPU_diff', 'CPU_pct_change', 'MemoryUsage', 'Memory_diff']]
-y = agg_data['CPU']
+# Prepare training data
+X = daily_agg[['CPU_rolling_mean_3', 'CPU_rolling_std_3', 'CPU_diff', 'CPU_pct_change']]
+y = daily_agg['CPU_75th']
 
-# Scale features
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-# Train/test split
-X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
-
-# LightGBM datasets
-train_data = lgb.Dataset(X_train, label=y_train)
-test_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
-
-# Model params
+# LightGBM parameters
 params = {
     'objective': 'regression',
-    'metric': 'l2',
+    'metric': 'rmse',
     'boosting_type': 'gbdt',
-    'num_leaves': 50,
+    'num_leaves': 100,
     'learning_rate': 0.01,
     'feature_fraction': 0.8,
     'lambda_l2': 0.5,
-    'max_depth': 6,
-    'min_data_in_leaf': 30,
+    'max_depth': 50,
+    'min_data_in_leaf': 20,
     'verbose': -1
 }
 
-# Callbacks
-early_stopping_callback = lgb.early_stopping(stopping_rounds=50)
-log_eval_callback = lgb.log_evaluation(period=100)
+# Manual K-Fold Cross Validation
+print("\n📊 Running manual 5-fold cross-validation...")
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+rmse_list = []
+all_preds = []
+all_truth = []
 
-# Train model
-evals_result = {}
-model = lgb.train(
-    params,
-    train_data,
-    valid_sets=[train_data, test_data],
-    num_boost_round=1000,
-    callbacks=[early_stopping_callback, log_eval_callback, lgb.record_evaluation(evals_result)]
-)
+for fold, (train_idx, test_idx) in enumerate(kf.split(X_scaled)):
+    X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
+    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-# Predict on test set
-y_pred = model.predict(X_test, num_iteration=model.best_iteration)
-mse = mean_squared_error(y_test, y_pred)
-rmse = np.sqrt(mse)
-print(f"\nMean Squared Error: {mse:.4f}")
-print(f"Root Mean Squared Error: {rmse:.4f}")
+    train_data = lgb.Dataset(X_train, label=y_train)
+    valid_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
 
-# --- Predict future usage ---
+    model = lgb.train(
+        params,
+        train_data,
+        num_boost_round=1000,
+        valid_sets=[train_data, valid_data],
+        valid_names=['train', 'valid'],
+        callbacks=[
+            early_stopping(stopping_rounds=50),
+            log_evaluation(period=0)  # Set to 0 or a number to control logging
+        ]
+    )
 
-# Get user input
-hours_to_predict = int(input("Enter the number of future hours to predict (e.g., 100): "))
+    y_pred = model.predict(X_test, num_iteration=model.best_iteration)
+    all_preds.extend(y_pred)
+    all_truth.extend(y_test)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    rmse_list.append(rmse)
+    print(f"Fold {fold + 1} RMSE: {rmse:.4f}")
 
-# Simulate future data points with mean/last-known trend
-last_row = agg_data.iloc[-1].copy()
-future_rows = []
-for i in range(hours_to_predict):
-    new_row = last_row.copy()
-    new_row['DateTime'] = last_row['DateTime'] + pd.Timedelta(hours=1)
-    
-    # For simulation, we assume CPU continues to follow last known diff
-    new_row['CPU'] = last_row['CPU'] + last_row['CPU_diff']
-    new_row['MemoryUsage'] = last_row['MemoryUsage'] + (last_row['Memory_diff'] if not np.isnan(last_row['Memory_diff']) else 0)
-    
-    # Update derived features
-    cpu_window = agg_data['CPU'].iloc[-2:].tolist() + [new_row['CPU']]
-    new_row['CPU_rolling_mean_3'] = np.mean(cpu_window)
-    new_row['CPU_rolling_std_3'] = np.std(cpu_window)
-    new_row['CPU_diff'] = new_row['CPU'] - last_row['CPU']
-    new_row['CPU_pct_change'] = new_row['CPU_diff'] / last_row['CPU'] if last_row['CPU'] != 0 else 0
-    new_row['Memory_diff'] = new_row['MemoryUsage'] - last_row['MemoryUsage']
-    
-    # Append and update
-    future_rows.append(new_row)
-    last_row = new_row
+print(f"\n✅ Average RMSE: {np.mean(rmse_list):.4f}")
 
-future_df = pd.DataFrame(future_rows)
-
-# Prepare future input
-X_future = future_df[['CPU_rolling_mean_3', 'CPU_rolling_std_3', 'CPU_diff', 'CPU_pct_change', 'MemoryUsage', 'Memory_diff']]
-X_future_scaled = scaler.transform(X_future)
-
-# Predict
-future_pred = model.predict(X_future_scaled, num_iteration=model.best_iteration)
-
-# Detect bottlenecks
-bottleneck_indices = np.where(future_pred > 90)[0]
-if len(bottleneck_indices) > 0:
-    print("\n⚠️  Bottleneck predicted at:")
-    for i in bottleneck_indices:
-        print(future_df.iloc[i]['DateTime'].strftime('%Y-%m-%d %H:%M'))
-else:
-    print(f"\n✅ No bottleneck predicted in the next {hours_to_predict} hours.")
-
-# --- Plots ---
-
-# Future CPU usage plot
+# --- Scatter Plot: Actual vs Predicted ---
 plt.figure(figsize=(12, 6))
-plt.plot(future_df['DateTime'], future_pred, label='Predicted CPU Usage', color='blue')
-plt.axhline(y=90, color='r', linestyle='--', label='Bottleneck Threshold')
-plt.legend()
-plt.title(f'Predicted CPU Usage for Next {hours_to_predict} Hours')
-plt.xlabel('Time')
-plt.ylabel('CPU Usage (%)')
-plt.xticks(rotation=45)
-plt.tight_layout()
-
-# Actual vs predicted plot
-plt.figure(figsize=(12, 6))
-plt.plot(y_test.values, label='Actual CPU Usage', color='orange')
-plt.plot(y_pred, label='Predicted CPU Usage', color='blue')
-plt.axhline(y=90, color='r', linestyle='--', label='Bottleneck Threshold')
-plt.legend()
-plt.title('Actual vs Predicted CPU Usage on Test Data')
+plt.scatter(range(len(all_truth)), all_truth, label='Actual CPU (75th)', alpha=0.6, color='green')
+plt.scatter(range(len(all_preds)), all_preds, label='Predicted CPU (75th)', alpha=0.6, color='blue')
+plt.axhline(y=90, color='red', linestyle='--', label='Bottleneck Threshold')
+plt.title('Scatter Plot: Actual vs Predicted CPU Usage (75th Percentile Daily)')
 plt.xlabel('Sample Index')
 plt.ylabel('CPU Usage (%)')
+plt.legend()
 plt.tight_layout()
-
 plt.show()
+
+# Get the last row of data for prediction
+last_row = daily_agg.iloc[-1][['CPU_rolling_mean_3', 'CPU_rolling_std_3', 'CPU_diff', 'CPU_pct_change', 'CPU_75th']]
+
+# User input: Number of days to predict
+# Number of days you want to predict
+num_days_to_predict = int(input("Enter the number of days to predict: "))
+
+# Initialize the list for predictions and update the features accordingly
+predictions = []
+last_row = daily_agg.iloc[-1].copy()  # Use .copy() to create a new object for modification
+
+# Define the threshold for considering predictions to be static
+change_threshold = 0.1  # Percentage threshold for change
+consecutive_static_days = 3  # Number of consecutive days with small change before predicting static
+
+# Variable to track consecutive days with no significant change
+static_counter = 0
+
+# Iterate over the number of days to predict
+for day in range(num_days_to_predict):
+    # Prepare features for the next day's prediction
+    features = [
+        last_row['CPU_rolling_mean_3'],
+        last_row['CPU_rolling_std_3'],
+        last_row['CPU_diff'],
+        last_row['CPU_pct_change']
+    ]
+
+    # Make the prediction for the next day
+    next_pred = model.predict([features])
+    predictions.append(next_pred[0])
+
+    # Check if the prediction is stable (i.e., doesn't change much from the last day)
+    if day > 0:
+        change = abs(predictions[-1] - predictions[-2])  # Difference between current and previous prediction
+        if change < change_threshold:
+            static_counter += 1
+        else:
+            static_counter = 0  # Reset counter if there is a significant change
+
+    # Update the features for the next prediction
+    # Update rolling mean and std with the new prediction
+    last_row['CPU_rolling_mean_3'] = np.mean([last_row['CPU_rolling_mean_3'], next_pred[0]])
+    last_row['CPU_rolling_std_3'] = np.std([last_row['CPU_rolling_mean_3'], next_pred[0]])
+    last_row['CPU_diff'] = next_pred[0] - last_row['CPU_75th']
+    last_row['CPU_pct_change'] = (next_pred[0] - last_row['CPU_75th']) / last_row['CPU_75th']
+    
+    # Update the 'CPU_75th' with the predicted value for the next day
+    last_row['CPU_75th'] = next_pred[0]
+
+    # Stop predicting if predictions become static for too long
+    if static_counter >= consecutive_static_days:
+        print(f"\n⚠️ Predictions have become stable after Day {day}. Further predictions may not be accurate.")
+        break
+
+# Print the predicted values
+print(f"\nPredicted CPU usage (75th percentile) for the next {num_days_to_predict} days:")
+for i, pred in enumerate(predictions, 1):
+    print(f"Day {i}: {pred:.2f}%")

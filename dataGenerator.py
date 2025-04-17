@@ -25,12 +25,12 @@ occasional_processes = [
     {'name': 'obs', 'base_mem': 400000, 'mem_var': 200000, 'base_cpu': 20.0, 'cpu_var': 15.0},
 ]
 
-def generate_process_data_for_30_days(output_file='system_usage_30days.csv'):
+def generate_process_data_for_1_year(output_file='system_usage_1year.csv'):
     processes = process_templates.copy()
     weights = [p['weight'] for p in processes]
 
     start_date = datetime(2025, 4, 1)
-    days = 30
+    days = 365  # Changed to 365 for one year
 
     with open(output_file, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -69,4 +69,4 @@ def generate_process_data_for_30_days(output_file='system_usage_30days.csv'):
                 current_time += timedelta(minutes=random.randint(1, 15))
 
 if __name__ == '__main__':
-    generate_process_data_for_30_days()
+    generate_process_data_for_1_year()
